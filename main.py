@@ -1,3 +1,6 @@
+from google.colab import drive
+drive.mount('/content/drive')
+
 import re
 import random
 import time
@@ -11,7 +14,6 @@ import torch.nn as nn
 import torchvision
 from torchvision import transforms
 
-
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -21,6 +23,47 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+import os
+import shutil
+from concurrent.futures import ThreadPoolExecutor
+
+# コビー元とコビー先のディレクトリを指定
+src_dir = "/content/drive/MyDrive/Colab Notebooks/DLBasics2024_colab/最終課題_VQA/data"
+dst_dir = "/content/data"
+
+# コビー先ディレクトリを作成
+os.makedirs(dst_dir, exist_ok=True)
+
+# コピーするファイルのリストを作成
+files_to_copy = []
+for root, _, files in os. walk(src_dir):
+    for file in files:
+        src_file = os.path.join(root, file)
+        dst_file = os.path.join(dst_dir, os.path.relpath(src_file, src_dir))
+        files_to_copy.append ((src_file, dst_file))
+
+# 並列でファイルをコビーする関数
+def copy_file(src_dst):
+    src_file, dst_file = src_dst
+    dst_file_dir = os.path.dirname(dst_file)
+    os.makedirs(dst_file_dir, exist_ok=True)
+    try:
+        shutil.copy2(src_file, dst_file)
+    except Exception as e:
+        print (f"Error copying {src_file} to {dst_file}: {e}")
+
+# ThreadPoolExecutorを使って並列でコビー
+with ThreadPoolExecutor(max_workers=24) as executor:
+    executor.map(copy_file, files_to_copy)
+
+# ファイルがすべてコビーされたかを確認
+copied_files = [os.path.join(root, file) for root, _, files in os.walk(dst_dir) for file in files]
+missing_files = [src for src, dst in files_to_copy if dst not in copied_files]
+
+if missing_files:
+    print (f"Missing files: {missing_files}")
+else:
+    print("All files copied successfully.")
 
 def process_text(text):
     # lowercase
@@ -60,7 +103,6 @@ def process_text(text):
 
     return text
 
-
 # 1. データローダーの作成
 class VQADataset(torch.utils.data.Dataset):
     def __init__(self, df_path, image_dir, transform=None, answer=True):
@@ -76,8 +118,9 @@ class VQADataset(torch.utils.data.Dataset):
         self.idx2answer = {}
 
         # 質問文に含まれる単語を辞書に追加
-        for question in self.df["question"]:
+        for i, question in enumerate(self.df["question"]):
             question = process_text(question)
+            self.df.at[i, "question"] = question
             words = question.split(" ")
             for word in words:
                 if word not in self.question2idx:
@@ -150,7 +193,6 @@ class VQADataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.df)
 
-
 # 2. 評価指標の実装
 # 簡単にするならBCEを利用する
 def VQA_criterion(batch_pred: torch.Tensor, batch_answers: torch.Tensor):
@@ -169,7 +211,6 @@ def VQA_criterion(batch_pred: torch.Tensor, batch_answers: torch.Tensor):
         total_acc += acc / 10
 
     return total_acc / len(batch_pred)
-
 
 # 3. モデルのの実装
 # ResNetを利用できるようにしておく
@@ -308,7 +349,6 @@ class VQAModel(nn.Module):
 
         return x
 
-
 # 4. 学習の実装
 def train(model, dataloader, optimizer, criterion, device):
     model.train()
@@ -358,52 +398,48 @@ def eval(model, dataloader, optimizer, criterion, device):
     return total_loss / len(dataloader), total_acc / len(dataloader), simple_acc / len(dataloader), time.time() - start
 
 
-def main():
-    # deviceの設定
-    set_seed(42)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+# deviceの設定
+set_seed(42)
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # dataloader / model
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor()
-    ])
-    train_dataset = VQADataset(df_path="./data/train.json", image_dir="./data/train", transform=transform)
-    test_dataset = VQADataset(df_path="./data/valid.json", image_dir="./data/valid", transform=transform, answer=False)
-    test_dataset.update_dict(train_dataset)
+# dataloader / model
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor()
+])
+train_dataset = VQADataset(df_path="/content/data/train.json", image_dir="/content/data/train", transform=transform)
+test_dataset = VQADataset(df_path="/content/data/valid.json", image_dir="/content/data/valid", transform=transform, answer=False)
+test_dataset.update_dict(train_dataset)
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False)
+train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True)
+test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False)
 
-    model = VQAModel(vocab_size=len(train_dataset.question2idx)+1, n_answer=len(train_dataset.answer2idx)).to(device)
+model = VQAModel(vocab_size=len(train_dataset.question2idx)+1, n_answer=len(train_dataset.answer2idx)).to(device)
 
-    # optimizer / criterion
-    num_epoch = 20
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+# optimizer / criterion
+num_epoch = 1
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
 
-    # train model
-    for epoch in range(num_epoch):
-        train_loss, train_acc, train_simple_acc, train_time = train(model, train_loader, optimizer, criterion, device)
-        print(f"【{epoch + 1}/{num_epoch}】\n"
-              f"train time: {train_time:.2f} [s]\n"
-              f"train loss: {train_loss:.4f}\n"
-              f"train acc: {train_acc:.4f}\n"
-              f"train simple acc: {train_simple_acc:.4f}")
+# train model
+for epoch in range(num_epoch):
+    train_loss, train_acc, train_simple_acc, train_time = train(model, train_loader, optimizer, criterion, device)
+    print(f"【{epoch + 1}/{num_epoch}】\n"
+          f"train time: {train_time:.2f} [s]\n"
+          f"train loss: {train_loss:.4f}\n"
+          f"train acc: {train_acc:.4f}\n"
+          f"train simple acc: {train_simple_acc:.4f}")
 
-    # 提出用ファイルの作成
-    model.eval()
-    submission = []
-    for image, question in test_loader:
-        image, question = image.to(device), question.to(device)
-        pred = model(image, question)
-        pred = pred.argmax(1).cpu().item()
-        submission.append(pred)
+# 提出用ファイルの作成
+model.eval()
+submission = []
+for image, question in test_loader:
+    image, question = image.to(device), question.to(device)
+    pred = model(image, question)
+    pred = pred.argmax(1).cpu().item()
+    submission.append(pred)
 
-    submission = [train_dataset.idx2answer[id] for id in submission]
-    submission = np.array(submission)
-    torch.save(model.state_dict(), "model.pth")
-    np.save("submission.npy", submission)
-
-if __name__ == "__main__":
-    main()
+submission = [train_dataset.idx2answer[id] for id in submission]
+submission = np.array(submission)
+torch.save(model.state_dict(), "model.pth")
+np.save("submission.npy", submission)
