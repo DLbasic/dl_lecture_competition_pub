@@ -66,7 +66,7 @@ import shutil
 from concurrent.futures import ThreadPoolExecutor
 
 # コビー元とコビー先のディレクトリを指定
-src_dir = "/content/drive/MyDrive/Colab Notebooks/DLBasics2024_colab/最終課題_VQA/data"
+src_dir = "/content/drive/MyDrive/Colab Notebooks/VQA/data"
 dst_dir = "/content/data"
 
 # コビー先ディレクトリを作成
@@ -425,7 +425,7 @@ test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=Fa
 model = VQAModel(vocab_size=len(train_dataset.question2idx)+1, n_answer=len(train_dataset.answer2idx)).to(device)
 
 # optimizer / criterion
-num_epoch = 3
+num_epoch = 5
 criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
 
