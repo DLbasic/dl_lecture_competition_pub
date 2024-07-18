@@ -23,6 +23,44 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+def process_text(text):
+    # lowercase
+    text = text.lower()
+
+    # 数詞を数字に変換
+    num_word_to_digit = {
+        'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4',
+        'five': '5', 'six': '6', 'seven': '7', 'eight': '8', 'nine': '9',
+        'ten': '10'
+    }
+    for word, digit in num_word_to_digit.items():
+        text = text.replace(word, digit)
+
+    # 小数点のピリオドを削除
+    text = re.sub(r'(?<!\d)\.(?!\d)', '', text)
+
+    # 冠詞の削除
+    text = re.sub(r'\b(a|an|the)\b', '', text)
+
+    # 短縮形のカンマの追加
+    contractions = {
+        "dont": "don't", "isnt": "isn't", "arent": "aren't", "wont": "won't",
+        "cant": "can't", "wouldnt": "wouldn't", "couldnt": "couldn't"
+    }
+    for contraction, correct in contractions.items():
+        text = text.replace(contraction, correct)
+
+    # 句読点をスペースに変換
+    text = re.sub(r"[^\w\s':]", ' ', text)
+
+    # 句読点をスペースに変換
+    text = re.sub(r'\s+,', ',', text)
+
+    # 連続するスペースを1つに変換
+    text = re.sub(r'\s+', ' ', text).strip()
+
+    return text
+
 import os
 import shutil
 from concurrent.futures import ThreadPoolExecutor
@@ -65,44 +103,6 @@ if missing_files:
 else:
     print("All files copied successfully.")
 
-def process_text(text):
-    # lowercase
-    text = text.lower()
-
-    # 数詞を数字に変換
-    num_word_to_digit = {
-        'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4',
-        'five': '5', 'six': '6', 'seven': '7', 'eight': '8', 'nine': '9',
-        'ten': '10'
-    }
-    for word, digit in num_word_to_digit.items():
-        text = text.replace(word, digit)
-
-    # 小数点のピリオドを削除
-    text = re.sub(r'(?<!\d)\.(?!\d)', '', text)
-
-    # 冠詞の削除
-    text = re.sub(r'\b(a|an|the)\b', '', text)
-
-    # 短縮形のカンマの追加
-    contractions = {
-        "dont": "don't", "isnt": "isn't", "arent": "aren't", "wont": "won't",
-        "cant": "can't", "wouldnt": "wouldn't", "couldnt": "couldn't"
-    }
-    for contraction, correct in contractions.items():
-        text = text.replace(contraction, correct)
-
-    # 句読点をスペースに変換
-    text = re.sub(r"[^\w\s':]", ' ', text)
-
-    # 句読点をスペースに変換
-    text = re.sub(r'\s+,', ',', text)
-
-    # 連続するスペースを1つに変換
-    text = re.sub(r'\s+', ' ', text).strip()
-
-    return text
-
 # 1. データローダーの作成
 class VQADataset(torch.utils.data.Dataset):
     def __init__(self, df_path, image_dir, transform=None, answer=True):
@@ -118,9 +118,8 @@ class VQADataset(torch.utils.data.Dataset):
         self.idx2answer = {}
 
         # 質問文に含まれる単語を辞書に追加
-        for i, question in enumerate(self.df["question"]):
+        for question in self.df["question"]:
             question = process_text(question)
-            self.df.at[i, "question"] = question
             words = question.split(" ")
             for word in words:
                 if word not in self.question2idx:
@@ -324,6 +323,10 @@ def ResNet18():
     return ResNet(BasicBlock, [2, 2, 2, 2])
 
 
+def ResNet26():
+    return ResNet(BasicBlock, [3, 3, 3, 3])
+
+
 def ResNet50():
     return ResNet(BottleneckBlock, [3, 4, 6, 3])
 
@@ -331,11 +334,11 @@ def ResNet50():
 class VQAModel(nn.Module):
     def __init__(self, vocab_size: int, n_answer: int):
         super().__init__()
-        self.resnet = ResNet18()
+        self.resnet = ResNet26()
         self.text_encoder = nn.Linear(vocab_size, 512)
 
         self.fc = nn.Sequential(
-            nn.Linear(1024, 512),
+            nn.Linear(512+512, 512),
             nn.ReLU(inplace=True),
             nn.Linear(512, n_answer)
         )
@@ -405,25 +408,34 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 # dataloader / model
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
-    transforms.ToTensor()
+    transforms.RandomHorizontalFlip(),  # 水平反転
+    transforms.RandomRotation(10),      # 回転
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),  # 色調整
+    transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),  # ランダムクロップ
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # 正規化
 ])
 train_dataset = VQADataset(df_path="/content/data/train.json", image_dir="/content/data/train", transform=transform)
 test_dataset = VQADataset(df_path="/content/data/valid.json", image_dir="/content/data/valid", transform=transform, answer=False)
 test_dataset.update_dict(train_dataset)
 
-train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True)
+train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=64, shuffle=True)
 test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False)
 
 model = VQAModel(vocab_size=len(train_dataset.question2idx)+1, n_answer=len(train_dataset.answer2idx)).to(device)
 
 # optimizer / criterion
-num_epoch = 1
+num_epoch = 3
 criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+
+# 学習率スケジューラーの追加
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
 
 # train model
 for epoch in range(num_epoch):
     train_loss, train_acc, train_simple_acc, train_time = train(model, train_loader, optimizer, criterion, device)
+    scheduler.step()
     print(f"【{epoch + 1}/{num_epoch}】\n"
           f"train time: {train_time:.2f} [s]\n"
           f"train loss: {train_loss:.4f}\n"
